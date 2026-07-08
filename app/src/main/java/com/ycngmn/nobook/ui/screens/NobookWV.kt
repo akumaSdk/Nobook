@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.core.graphics.ColorUtils
+import androidx.core.net.toUri
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -33,19 +34,19 @@ import com.multiplatform.webview.web.LoadingState
 import com.multiplatform.webview.web.WebView
 import com.multiplatform.webview.web.rememberSaveableWebViewState
 import com.multiplatform.webview.web.rememberWebViewNavigator
-import com.ycngmn.nobook.data.local.entity.NobookConfig
+import com.ycngmn.nobook.R
 import com.ycngmn.nobook.ui.components.NetworkErrorDialog
 import com.ycngmn.nobook.ui.components.settings.SettingsDialog
 import com.ycngmn.nobook.ui.viewmodel.MainViewModel
 import com.ycngmn.nobook.ui.viewmodel.SettingsViewModel
+import com.ycngmn.nobook.utils.DESKTOP_USER_AGENT
 import com.ycngmn.nobook.utils.ExternalRequestInterceptor
 import com.ycngmn.nobook.utils.fileChooserWebViewParams
-import com.ycngmn.nobook.utils.getDesktopUserAgent
-import com.ycngmn.nobook.utils.isAutoDesktop
 import com.ycngmn.nobook.utils.jsBridge.ClipboardBridge
 import com.ycngmn.nobook.utils.jsBridge.DownloadBridge
 import com.ycngmn.nobook.utils.jsBridge.NobookSettings
 import com.ycngmn.nobook.utils.jsBridge.ThemeChange
+import com.ycngmn.nobook.utils.rememberAutoDesktop
 import com.ycngmn.nobook.utils.rememberImeHeight
 import kotlinx.coroutines.delay
 
@@ -60,14 +61,14 @@ fun NobookWebView(
 
     val state = rememberSaveableWebViewState(url)
     val navigator = rememberWebViewNavigator(
-        requestInterceptor = ExternalRequestInterceptor {
-            val intent = Intent.parseUri(it, Intent.URI_INTENT_SCHEME)
+        requestInterceptor = ExternalRequestInterceptor { externalUrl ->
+            val intent = Intent(Intent.ACTION_VIEW, externalUrl.toUri())
             runCatching {
                 context.startActivity(intent)
             }.onFailure {
                 Toast.makeText(
                     context,
-                    "Not supported",
+                    resources.getString(R.string.not_supported),
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -84,16 +85,22 @@ fun NobookWebView(
     // allow exiting while scrolling to top.
     var exitScroll by remember { mutableStateOf(false) }
     BackHandler {
-        if (exitScroll) activity?.finish()
-        else navigator.evaluateJavaScript("backHandlerNB();") {
-            val backHandled = it.removeSurrounding("\"")
-            when (backHandled) {
-                "false" -> {
-                    if (navigator.canGoBack) navigator.navigateBack()
-                    else activity?.finish()
+        if (exitScroll) {
+            activity?.finish()
+        } else {
+            navigator.evaluateJavaScript("backHandlerNB();") {
+                val backHandled = it.removeSurrounding("\"")
+                when (backHandled) {
+                    "false" -> {
+                        if (navigator.canGoBack) {
+                            navigator.navigateBack()
+                        } else {
+                            activity?.finish()
+                        }
+                    }
+                    "exit" -> activity?.finish()
+                    "scrolling" -> exitScroll = true
                 }
-                "exit" -> activity?.finish()
-                "scrolling" -> exitScroll = true
             }
         }
     }
@@ -107,7 +114,7 @@ fun NobookWebView(
 
     val isDesktop by settingsVM.desktopLayout.collectAsState()
     val isAutoRevert by settingsVM.isRevertDesktop.collectAsState()
-    val isAutoDesktop = isAutoDesktop()
+    val isAutoDesktop = rememberAutoDesktop()
 
     LaunchedEffect(Unit) {
         if (isAutoDesktop && !isDesktop) {
@@ -123,28 +130,10 @@ fun NobookWebView(
     var isLoading by rememberSaveable { mutableStateOf(true) }
     val isError = state.errorsForCurrentRequest.lastOrNull()?.isFromMainFrame == true
 
-    val config = {
-        NobookConfig(
-            removeAds = settingsVM.removeAds.value,
-            enableDownloadContent = settingsVM.enableDownloadContent.value,
-            enableCopyToClipboard = settingsVM.enableCopyToClipboard.value,
-            desktopLayout = settingsVM.desktopLayout.value,
-            immersiveMode = settingsVM.immersiveMode.value,
-            stickyNavbar = settingsVM.stickyNavbar.value,
-            pinchToZoom = settingsVM.pinchToZoom.value,
-            amoledBlack = settingsVM.amoledBlack.value,
-            hideSuggested = settingsVM.hideSuggested.value,
-            hideReels = settingsVM.hideReels.value,
-            hideStories = settingsVM.hideStories.value,
-            hidePeopleYouMayKnow = settingsVM.hidePeopleYouMayKnow.value,
-            hideGroups = settingsVM.hideGroups.value
-        )
-    }
-
     val viewModel: MainViewModel = viewModel {
         MainViewModel(
             resources = resources,
-            config = config()
+            settings = settingsVM
         )
     }
 
@@ -168,6 +157,7 @@ fun NobookWebView(
         }
         isImmersiveMode = immersive
     }
+
     LaunchedEffect(isImmersiveMode, themeColor.value) {
         setWindow(isImmersiveMode)
     }
@@ -177,11 +167,10 @@ fun NobookWebView(
 
     LaunchedEffect(loadingState, userScripts) {
         if (loadingState is LoadingState.Finished) {
-            userScripts?.let {
-                navigator.evaluateJavaScript(it) {
+            userScripts?.let { scripts ->
+                navigator.evaluateJavaScript(scripts) {
                     isLoading = false
                 }
-                viewModel.clearScripts()
             }
         }
     }
@@ -201,11 +190,12 @@ fun NobookWebView(
                 settingsToggle = false
             },
             onReload = {
+                isLoading = true
                 viewModel.setThemeColor(Color.Transparent)
                 setWindow(settingsVM.immersiveMode.value)
                 viewModel.refresh(
                     resources = resources,
-                    config = config()
+                    settings = settingsVM
                 )
                 navigator.reload()
             }
@@ -222,8 +212,9 @@ fun NobookWebView(
         )
     }
 
-    val userAgent = if (isDesktop) getDesktopUserAgent() else ""
-    LaunchedEffect(userAgent) {
+
+    LaunchedEffect(isDesktop) {
+        val userAgent = if (isDesktop) DESKTOP_USER_AGENT else ""
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
@@ -257,7 +248,6 @@ fun NobookWebView(
             cookieManager.flush()
 
             state.webSettings.apply {
-                customUserAgentString = userAgent
                 isJavaScriptEnabled = true
 
                 androidWebSettings.apply {
